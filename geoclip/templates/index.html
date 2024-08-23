@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoCLIP Plus Service</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        input, button {
+            margin: 10px 0;
+        }
+        #results, #heatmap {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>GeoCLIP Plus Service</h1>
+    <form id="predictForm">
+        <input type="file" id="imageInput" accept="image/*" required>
+        <input type="number" id="topK" value="5" min="1" max="10">
+        <button type="submit">Predict Location</button>
+    </form>
+    <div id="results"></div>
+    <div id="heatmap"></div>
+
+    <script>
+        document.getElementById('predictForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('image', document.getElementById('imageInput').files[0]);
+            formData.append('top_k', document.getElementById('topK').value);
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+                const predictions = await response.json();
+                displayResults(predictions);
+                generateHeatmap(formData);
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        });
+
+        function displayResults(predictions) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<h2>Predictions:</h2>';
+            predictions.forEach((pred, index) => {
+                resultsDiv.innerHTML += `<p>${index + 1}. Lat: ${pred[0]}, Lon: ${pred[1]}, Confidence: ${pred[2]}</p>`;
+            });
+        }
+
+        async function generateHeatmap(formData) {
+            try {
+                const response = await fetch('/heatmap', {
+                    method: 'POST',
+                    body: formData
+                });
+                const blob = await response.blob();
+                const imageUrl = URL.createObjectURL(blob);
+                document.getElementById('heatmap').innerHTML = `<h2>Heatmap:</h2><img src="${imageUrl}" alt="Prediction Heatmap">`;
+            } catch (error) {
+                console.error('Error generating heatmap:', error);
+            }
+        }
+    </script>
+</body>
+</html>
