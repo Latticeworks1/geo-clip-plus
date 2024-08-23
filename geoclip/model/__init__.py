@@ -9,7 +9,7 @@ Main components:
 - ImageEncoder: Encodes images into feature vectors.
 - LocationEncoder: Encodes geographical coordinates into feature vectors.
 - locate: A simplified interface for quick predictions.
-- utils: Utility functions for data handling and evaluation.
+- utils: Utility functions for data handling, evaluation, and other operations.
 
 Example usage:
     from geoclip import locate
@@ -26,8 +26,18 @@ from .geoclip import GeoCLIP
 from .image_encoder import ImageEncoder
 from .location_encoder import LocationEncoder
 from .locate import locate, image
-from . import utils
+from .utils import set_seed, load_gps_data, haversine_distance, evaluate_predictions
 
-__all__ = ["GeoCLIP", "ImageEncoder", "LocationEncoder", "locate", "image", "utils"]
+__all__ = [
+    "GeoCLIP", 
+    "ImageEncoder", 
+    "LocationEncoder", 
+    "locate", 
+    "image", 
+    "set_seed", 
+    "load_gps_data", 
+    "haversine_distance", 
+    "evaluate_predictions"
+]
 
 __version__ = "1.0.0"
