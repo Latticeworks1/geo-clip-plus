@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .rff import GaussianEncoding
-from .misc import file_dir
+from .utils import file_dir
 
 # Constants for Equal Earth projection
 A1 = 1.340264
