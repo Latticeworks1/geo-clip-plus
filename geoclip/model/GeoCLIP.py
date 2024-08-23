@@ -8,7 +8,8 @@ from .location_encoder import LocationEncoder
 from .misc import load_gps_data, file_dir
 
 from PIL import Image
-from torchvision.transforms import ToPILImage
+import requests
+from io import BytesIO
 
 class GeoCLIP(nn.Module):
     def __init__(self, from_pretrained=True, queue_size=4096):
@@ -17,6 +18,7 @@ class GeoCLIP(nn.Module):
         self.image_encoder = ImageEncoder()
         self.location_encoder = LocationEncoder()
 
+        # Load GPS gallery data
         self.gps_gallery = load_gps_data(os.path.join(file_dir, "gps_gallery", "coordinates_100K.csv"))
         self._initialize_gps_queue(queue_size)
 
@@ -24,9 +26,22 @@ class GeoCLIP(nn.Module):
             self.weights_folder = os.path.join(file_dir, "weights")
             self._load_weights()
 
-        self.device = "cpu"
+        # Automatic device selection
+        self.device = self._select_device()
 
-    def to(self, device):
+    def _select_device(self):
+        """Automatically select the best available device: GPU, MPS, or CPU."""
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            return torch.device("mps")
+        else:
+            return torch.device("cpu")
+
+    def to(self, device=None):
+        """Move model and its components to the specified device."""
+        if device is None:
+            device = self.device
         self.device = device
         self.image_encoder.to(device)
         self.location_encoder.to(device)
@@ -34,11 +49,16 @@ class GeoCLIP(nn.Module):
         return super().to(device)
 
     def _load_weights(self):
-        self.image_encoder.mlp.load_state_dict(torch.load(f"{self.weights_folder}/image_encoder_mlp_weights.pth"))
-        self.location_encoder.load_state_dict(torch.load(f"{self.weights_folder}/location_encoder_weights.pth"))
-        self.logit_scale = nn.Parameter(torch.load(f"{self.weights_folder}/logit_scale_weights.pth"))
+        """Load pretrained weights for the model components."""
+        try:
+            self.image_encoder.mlp.load_state_dict(torch.load(f"{self.weights_folder}/image_encoder_mlp_weights.pth"))
+            self.location_encoder.load_state_dict(torch.load(f"{self.weights_folder}/location_encoder_weights.pth"))
+            self.logit_scale = nn.Parameter(torch.load(f"{self.weights_folder}/logit_scale_weights.pth"))
+        except FileNotFoundError as e:
+            print(f"Error loading weights: {e}")
 
     def _initialize_gps_queue(self, queue_size):
+        """Initialize the GPS queue with normalized random values."""
         self.queue_size = queue_size
         self.register_buffer("gps_queue", torch.randn(2, self.queue_size))
         self.gps_queue = nn.functional.normalize(self.gps_queue, dim=0)
@@ -46,15 +66,16 @@ class GeoCLIP(nn.Module):
 
     @torch.no_grad()
     def dequeue_and_enqueue(self, gps):
-        """ Update GPS queue
+        """Update GPS queue by dequeuing and enqueuing new GPS data.
 
         Args:
             gps (torch.Tensor): GPS tensor of shape (batch_size, 2)
         """
         gps_batch_size = gps.shape[0]
         gps_ptr = int(self.gps_queue_ptr)
-        
-        assert self.queue_size % gps_batch_size == 0, f"Queue size {self.queue_size} should be divisible by batch size {gps_batch_size}"
+
+        if self.queue_size % gps_batch_size != 0:
+            raise ValueError(f"Queue size {self.queue_size} should be divisible by batch size {gps_batch_size}")
 
         # Replace the GPS from ptr to ptr+gps_batch_size (dequeue and enqueue)
         self.gps_queue[:, gps_ptr:gps_ptr + gps_batch_size] = gps.t()
@@ -62,46 +83,62 @@ class GeoCLIP(nn.Module):
         self.gps_queue_ptr[0] = gps_ptr
 
     def get_gps_queue(self):
+        """Return the GPS queue as a transposed tensor."""
         return self.gps_queue.t()
-                                             
+
+    def _load_image(self, image_path_or_url):
+        """Load an image from a file path or a URL.
+
+        Args:
+            image_path_or_url (str): Path to the image or URL of the image
+
+        Returns:
+            PIL.Image: Loaded image
+        """
+        if image_path_or_url.startswith('http://') or image_path_or_url.startswith('https://'):
+            response = requests.get(image_path_or_url)
+            image = Image.open(BytesIO(response.content)).convert('RGB')
+        else:
+            image = Image.open(image_path_or_url).convert('RGB')
+        return image
+
     def forward(self, image, location):
-        """ GeoCLIP's forward pass
+        """GeoCLIP's forward pass to compute logits for images and locations.
 
         Args:
             image (torch.Tensor): Image tensor of shape (n, 3, 224, 224)
             location (torch.Tensor): GPS location tensor of shape (m, 2)
 
         Returns:
-            logits_per_image (torch.Tensor): Logits per image of shape (n, m)
+            torch.Tensor: Logits per image of shape (n, m)
         """
-
         # Compute Features
         image_features = self.image_encoder(image)
         location_features = self.location_encoder(location)
         logit_scale = self.logit_scale.exp()
-        
+
         # Normalize features
         image_features = F.normalize(image_features, dim=1)
         location_features = F.normalize(location_features, dim=1)
-        
+
         # Cosine similarity (Image Features & Location Features)
         logits_per_image = logit_scale * (image_features @ location_features.t())
 
         return logits_per_image
 
     @torch.no_grad()
-    def predict(self, image_path, top_k):
-        """ Given an image, predict the top k GPS coordinates
+    def predict(self, image_path_or_url, top_k):
+        """Given an image, predict the top k GPS coordinates.
 
         Args:
-            image_path (str): Path to the image
+            image_path_or_url (str): Path to the image or URL of the image
             top_k (int): Number of top predictions to return
 
         Returns:
-            top_pred_gps (torch.Tensor): Top k GPS coordinates of shape (k, 2)
-            top_pred_prob (torch.Tensor): Top k GPS probabilities of shape (k,)
+            torch.Tensor: Top k GPS coordinates of shape (k, 2)
+            torch.Tensor: Top k GPS probabilities of shape (k,)
         """
-        image = Image.open(image_path)
+        image = self._load_image(image_path_or_url)
         image = self.image_encoder.preprocess_image(image)
         image = image.to(self.device)
 
