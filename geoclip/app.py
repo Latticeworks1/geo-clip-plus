@@ -21,7 +21,7 @@ import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from geoclip import GeoCLIP
 from PIL import Image
 from io import BytesIO
@@ -113,11 +113,11 @@ async def predict(file: UploadFile = File(...), top_k: int = 5):
         image.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue()).decode()
 
-        return {
+        return JSONResponse({
             "predictions": predictions,
             "heatmap": heatmap,
             "image": img_str
-        }
+        })
     except Exception as e:
         logger.error(f"Prediction failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
