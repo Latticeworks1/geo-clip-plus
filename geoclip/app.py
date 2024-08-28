@@ -10,29 +10,26 @@ provides robust error handling and logging.
 
 Attributes:
     logger (logging.Logger): Logger for the module.
-
-Functions:
-    create_app(): Creates and configures the FastAPI application.
-    run_server(host: str, port: int): Runs the server with the specified host and port.
+    app (FastAPI): The FastAPI application instance.
 
 Usage:
-    To run the server, execute this script directly or import and use the run_server function.
+    This module is intended to be run as a FastAPI application.
+    Use 'uvicorn geoclip.app:app' to run the server.
 """
 
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
-from .model.geoclip import GeoCLIP
+from geoclip import GeoCLIP
 from PIL import Image
 from io import BytesIO
 import logging
 from typing import Dict, List
-import uvicorn
 import torch
 import folium
 from folium.plugins import HeatMap
-import matplotlib.pyplot as plt
 import base64
 
 # Set up logging
@@ -56,92 +53,84 @@ def select_device() -> torch.device:
         logger.info("No GPU available. Using CPU.")
         return torch.device("cpu")
 
-def create_app() -> FastAPI:
-    """
-    Creates and configures the FastAPI application.
+app = FastAPI(
+    title="Geoserve API",
+    description="API and Web Application for image geolocation prediction using GeoCLIP",
+    version="1.0.0"
+)
 
-    This function sets up CORS, initializes the GeoCLIP model,
-    and defines the API endpoints and web frontend.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="geoclip/static"), name="static")
+
+# Initialize model
+device = select_device()
+model = GeoCLIP(from_pretrained=True).to(device)
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    """Serves the main page of the web application."""
+    with open("geoclip/templates/index.html", "r") as f:
+        return f.read()
+
+@app.post("/predict")
+async def predict(file: UploadFile = File(...), top_k: int = 5):
+    """
+    Predicts geolocation for the uploaded image and returns prediction results and heatmap.
+
+    Args:
+        file (UploadFile): The uploaded image file.
+        top_k (int): The number of top predictions to return. Defaults to 5.
 
     Returns:
-        FastAPI: The configured FastAPI application.
+        Dict: A dictionary containing predictions, heatmap HTML, and image data.
+
+    Raises:
+        HTTPException: If the prediction fails.
     """
-    app = FastAPI(
-        title="Geoserve API",
-        description="API and Web Application for image geolocation prediction using GeoCLIP",
-        version="1.0.0"
-    )
-    
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    try:
+        contents = await file.read()
+        image = Image.open(BytesIO(contents))
+        
+        top_pred_gps, top_pred_prob = model.predict(image, top_k)
+        
+        predictions = [
+            {"lat": float(lat), "lon": float(lon), "probability": float(prob)}
+            for (lat, lon), prob in zip(top_pred_gps, top_pred_prob)
+        ]
 
-    device = select_device()
-    model = GeoCLIP(from_pretrained=True).to(device)
+        heatmap = generate_heatmap(top_pred_gps, top_pred_prob)
+        
+        # Convert image to base64 for frontend display
+        buffered = BytesIO()
+        image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    @app.get("/", response_class=HTMLResponse)
-    async def read_root():
-        """Serves the main page of the web application."""
-        with open("geoclip/templates/index.html", "r") as f:
-            return f.read()
+        return {
+            "predictions": predictions,
+            "heatmap": heatmap,
+            "image": img_str
+        }
+    except Exception as e:
+        logger.error(f"Prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    @app.post("/predict")
-    async def predict(file: UploadFile = File(...), top_k: int = 5):
-        """
-        Predicts geolocation for the uploaded image and returns prediction results and heatmap.
+@app.get("/health")
+async def health_check() -> Dict[str, str]:
+    """
+    Checks the health status of the API.
 
-        Args:
-            file (UploadFile): The uploaded image file.
-            top_k (int): The number of top predictions to return. Defaults to 5.
-
-        Returns:
-            Dict: A dictionary containing predictions, heatmap HTML, and image data.
-
-        Raises:
-            HTTPException: If the prediction fails.
-        """
-        try:
-            contents = await file.read()
-            image = Image.open(BytesIO(contents))
-            
-            top_pred_gps, top_pred_prob = model.predict(image, top_k)
-            
-            predictions = [
-                {"lat": float(lat), "lon": float(lon), "probability": float(prob)}
-                for (lat, lon), prob in zip(top_pred_gps, top_pred_prob)
-            ]
-
-            heatmap = generate_heatmap(top_pred_gps, top_pred_prob)
-            
-            # Convert image to base64 for frontend display
-            buffered = BytesIO()
-            image.save(buffered, format="PNG")
-            img_str = base64.b64encode(buffered.getvalue()).decode()
-
-            return {
-                "predictions": predictions,
-                "heatmap": heatmap,
-                "image": img_str
-            }
-        except Exception as e:
-            logger.error(f"Prediction failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/health")
-    async def health_check() -> Dict[str, str]:
-        """
-        Checks the health status of the API.
-
-        Returns:
-            Dict[str, str]: A dictionary indicating the API status.
-        """
-        return {"status": "healthy"}
-
-    return app
+    Returns:
+        Dict[str, str]: A dictionary indicating the API status.
+    """
+    return {"status": "healthy"}
 
 def generate_heatmap(top_pred_gps, top_pred_prob):
     """
@@ -186,17 +175,6 @@ def generate_heatmap(top_pred_gps, top_pred_prob):
 
     return m._repr_html_()
 
-def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
-    """
-    Runs the FastAPI server.
-
-    Args:
-        host (str): The host to bind the server to. Defaults to "0.0.0.0".
-        port (int): The port to bind the server to. Defaults to 8000.
-    """
-    app = create_app()
-    logger.info(f"Starting server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
-
 if __name__ == "__main__":
-    run_server()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
