@@ -1,86 +1,135 @@
-from flask import Flask, request, jsonify, send_file, render_template
-from io import BytesIO
+"""
+Geoserve API Application
+
+This module provides a FastAPI application for serving GeoCLIP model predictions.
+It includes endpoints for image geolocation prediction and health checking.
+
+The application supports automatic device selection (CUDA, MPS, or CPU) and
+provides robust error handling and logging.
+
+Attributes:
+    logger (logging.Logger): Logger for the module.
+
+Functions:
+    create_app(): Creates and configures the FastAPI application.
+    run_server(host: str, port: int): Runs the server with the specified host and port.
+
+Usage:
+    To run the server, execute this script directly or import and use the run_server function.
+"""
+
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from .model.geoclip import GeoCLIP
 from PIL import Image
+from io import BytesIO
+import logging
+from typing import Dict, List, Tuple
+import uvicorn
 import torch
-from geoclip.model.GeoCLIP import GeoCLIP
-import folium
-from folium.plugins import HeatMap
 
-app = Flask(__name__)
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.Logger(__name__)
 
-# Initialize the GeoCLIP model
-model = GeoCLIP(from_pretrained=True)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+def select_device() -> torch.device:
+    """
+    Selects the most appropriate device for model execution.
 
-@app.route('/')
-def home():
-    return render_template('index.html')
+    Returns:
+        torch.device: The selected device (CUDA, MPS, or CPU).
+    """
+    if torch.cuda.is_available():
+        logger.info("CUDA is available. Using GPU.")
+        return torch.device("cuda")
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        logger.info("MPS is available. Using Metal GPU.")
+        return torch.device("mps")
+    else:
+        logger.info("No GPU available. Using CPU.")
+        return torch.device("cpu")
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
-    
-    image_file = request.files['image']
-    top_k = int(request.form.get('top_k', 5))
-    
-    # Load and preprocess the image
-    img = Image.open(image_file)
-    img = model.image_encoder.preprocess_image(img).unsqueeze(0).to(device)
-    
-    # Predict GPS coordinates
-    top_pred_gps, top_pred_prob = model.predict(img, top_k)
-    
-    predictions = [
-        {"lat": float(gps[0]), "lon": float(gps[1]), "confidence": float(prob)}
-        for gps, prob in zip(top_pred_gps, top_pred_prob)
-    ]
-    
-    return jsonify(predictions)
+def create_app() -> FastAPI:
+    """
+    Creates and configures the FastAPI application.
 
-@app.route('/heatmap', methods=['POST'])
-def heatmap():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
-    
-    image_file = request.files['image']
-    top_k = int(request.form.get('top_k', 5))
-    
-    # Load and preprocess the image
-    img = Image.open(image_file)
-    img = model.image_encoder.preprocess_image(img).unsqueeze(0).to(device)
-    
-    # Predict GPS coordinates
-    top_pred_gps, top_pred_prob = model.predict(img, top_k)
-    
-    # Generate heatmap
-    predictions = [
-        (float(gps[0]), float(gps[1]), float(prob))
-        for gps, prob in zip(top_pred_gps, top_pred_prob)
-    ]
-    heatmap = create_heatmap(predictions)
-    
-    # Save the heatmap to a BytesIO object
-    heatmap_data = BytesIO()
-    heatmap.save(heatmap_data, format='png')
-    heatmap_data.seek(0)
-    return send_file(heatmap_data, mimetype='image/png', as_attachment=True, attachment_filename='heatmap.png')
+    This function sets up CORS, initializes the GeoCLIP model,
+    and defines the API endpoints.
 
-def create_heatmap(predictions):
-    coords, weights = zip(*[(pred[:2], pred[2]) for pred in predictions])
-    norm_weights = [w / sum(weights) for w in weights]
+    Returns:
+        FastAPI: The configured FastAPI application.
+    """
+    app = FastAPI(
+        title="Geoserve API",
+        description="API for image geolocation prediction using GeoCLIP",
+        version="1.0.0"
+    )
     
-    center = (sum(lat for lat, _ in coords) / len(coords), sum(lon for _, lon in coords) / len(coords))
-    m = folium.Map(location=center, zoom_start=2)
-    
-    HeatMap(list(zip(coords, norm_weights)), gradient={0.0: '#932667', 1.0: '#fcfdbf'}).add_to(m)
-    folium.Marker(
-        location=coords[0],
-        popup=f"Top Prediction: {coords[0]} with confidence {norm_weights[0]:.4f}",
-        icon=folium.Icon(color='orange', icon='star')
-    ).add_to(m)
-    return m
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    device = select_device()
+    model = GeoCLIP(from_pretrained=True).to(device)
+
+    @app.post("/predict", response_model=Dict[str, List[Dict[str, float]]])
+    async def predict(file: UploadFile = File(...), top_k: int = 5) -> Dict[str, List[Dict[str, float]]]:
+        """
+        Predicts geolocation for the uploaded image.
+
+        Args:
+            file (UploadFile): The uploaded image file.
+            top_k (int): The number of top predictions to return. Defaults to 5.
+
+        Returns:
+            Dict[str, List[Dict[str, float]]]: A dictionary containing the top predictions.
+
+        Raises:
+            HTTPException: If the prediction fails.
+        """
+        try:
+            contents = await file.read()
+            image = Image.open(BytesIO(contents))
+            
+            top_pred_gps, top_pred_prob = model.predict(image, top_k)
+            
+            predictions = [
+                {"lat": float(lat), "lon": float(lon), "probability": float(prob)}
+                for (lat, lon), prob in zip(top_pred_gps, top_pred_prob)
+            ]
+            
+            return {"predictions": predictions}
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/health")
+    async def health_check() -> Dict[str, str]:
+        """
+        Checks the health status of the API.
+
+        Returns:
+            Dict[str, str]: A dictionary indicating the API status.
+        """
+        return {"status": "healthy"}
+
+    return app
+
+def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
+    """
+    Runs the FastAPI server.
+
+    Args:
+        host (str): The host to bind the server to. Defaults to "0.0.0.0".
+        port (int): The port to bind the server to. Defaults to 8000.
+    """
+    app = create_app()
+    logger.info(f"Starting server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)
+
+if __name__ == "__main__":
+    run_server()
