@@ -3,78 +3,98 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GeoCLIP Plus Service</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        h1 {
-            color: #333;
-        }
-        form {
-            margin-bottom: 20px;
-        }
-        input, button {
-            margin: 10px 0;
-        }
-        #results, #heatmap {
-            margin-top: 20px;
-        }
-    </style>
+    <title>Geoserve - Image Geolocation Prediction</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.7.1/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.7.1/dist/leaflet.css" />
 </head>
-<body>
-    <h1>GeoCLIP Plus Service</h1>
-    <form id="predictForm">
-        <input type="file" id="imageInput" accept="image/*" required>
-        <input type="number" id="topK" value="5" min="1" max="10">
-        <button type="submit">Predict Location</button>
-    </form>
-    <div id="results"></div>
-    <div id="heatmap"></div>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-6">Geoserve - Image Geolocation Prediction</h1>
+        
+        <div class="mb-6">
+            <label for="image-upload" class="block text-sm font-medium text-gray-700 mb-2">
+                Upload an image
+            </label>
+            <input type="file" id="image-upload" accept="image/*" class="block w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-full file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100">
+        </div>
+
+        <button id="predict-btn" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            Predict Location
+        </button>
+
+        <div id="results" class="mt-8">
+            <div id="uploaded-image" class="mb-6 hidden">
+                <h2 class="text-xl font-semibold mb-2">Uploaded Image:</h2>
+                <img id="uploaded-image-preview" class="max-w-full h-auto">
+            </div>
+
+            <div id="predictions" class="mb-6 hidden">
+                <h2 class="text-xl font-semibold mb-2">Predictions:</h2>
+                <ul id="predictions-list" class="list-disc pl-5"></ul>
+            </div>
+
+            <div id="heatmap" class="mb-6 hidden">
+                <h2 class="text-xl font-semibold mb-2">Heatmap:</h2>
+                <div id="map" style="height: 400px;"></div>
+            </div>
+        </div>
+    </div>
 
     <script>
-        document.getElementById('predictForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
+        document.getElementById('predict-btn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('image-upload');
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('Please select an image file first.');
+                return;
+            }
+
             const formData = new FormData();
-            formData.append('image', document.getElementById('imageInput').files[0]);
-            formData.append('top_k', document.getElementById('topK').value);
+            formData.append('file', file);
 
             try {
                 const response = await fetch('/predict', {
                     method: 'POST',
                     body: formData
                 });
-                const predictions = await response.json();
-                displayResults(predictions);
-                generateHeatmap(formData);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                displayResults(data);
             } catch (error) {
-                console.error('Error:', error);
+                console.error('Prediction failed:', error);
+                alert('Failed to get predictions. Please try again.');
             }
         });
 
-        function displayResults(predictions) {
-            const resultsDiv = document.getElementById('results');
-            resultsDiv.innerHTML = '<h2>Predictions:</h2>';
-            predictions.forEach((pred, index) => {
-                resultsDiv.innerHTML += `<p>${index + 1}. Lat: ${pred[0]}, Lon: ${pred[1]}, Confidence: ${pred[2]}</p>`;
-            });
-        }
+        function displayResults(data) {
+            // Display uploaded image
+            const uploadedImage = document.getElementById('uploaded-image-preview');
+            uploadedImage.src = `data:image/png;base64,${data.image}`;
+            document.getElementById('uploaded-image').classList.remove('hidden');
 
-        async function generateHeatmap(formData) {
-            try {
-                const response = await fetch('/heatmap', {
-                    method: 'POST',
-                    body: formData
-                });
-                const blob = await response.blob();
-                const imageUrl = URL.createObjectURL(blob);
-                document.getElementById('heatmap').innerHTML = `<h2>Heatmap:</h2><img src="${imageUrl}" alt="Prediction Heatmap">`;
-            } catch (error) {
-                console.error('Error generating heatmap:', error);
-            }
+            // Display predictions
+            const predictionsList = document.getElementById('predictions-list');
+            predictionsList.innerHTML = '';
+            data.predictions.forEach((pred, index) => {
+                const li = document.createElement('li');
+                li.textContent = `Prediction ${index + 1}: (${pred.lat.toFixed(6)}, ${pred.lon.toFixed(6)}) - Probability: ${(pred.probability * 100).toFixed(2)}%`;
+                predictionsList.appendChild(li);
+            });
+            document.getElementById('predictions').classList.remove('hidden');
+
+            // Display heatmap
+            document.getElementById('map').innerHTML = data.heatmap;
+            document.getElementById('heatmap').classList.remove('hidden');
         }
     </script>
 </body>
